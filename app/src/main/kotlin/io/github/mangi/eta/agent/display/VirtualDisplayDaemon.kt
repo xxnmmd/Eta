@@ -9,6 +9,7 @@ import android.media.Image
 import android.media.ImageReader
 import android.os.Handler
 import android.os.HandlerThread
+import android.os.Looper
 import android.os.Process
 import android.os.SystemClock
 import java.io.BufferedReader
@@ -59,8 +60,10 @@ internal object VirtualDisplayDaemon {
         var reader: ImageReader? = null
         var frameThread: HandlerThread? = null
         try {
-            bypassHiddenApiRestrictions(log)
-            val context = systemContext(log)
+            bypassHiddenApiRestrictions()
+            // systemMain() 会创建 Handler，主线程必须先有 Looper，否则 app_process 直接失败。
+            Looper.prepareMainLooper()
+            val context = systemContext()
             val latest = AtomicReference<Bitmap?>(null)
             val imageReader = ImageReader.newInstance(
                 options.width,
@@ -96,6 +99,8 @@ internal object VirtualDisplayDaemon {
             val displayId = virtualDisplay.display.displayId
             log.write("display created id=$displayId")
             writeStatus(controlDir, displayId, options, state = "running")
+            // 空显示没有内容就没有帧；先给它一个 home，之后模型可以再启动别的应用。
+            launchHome(displayId, log)
             awaitFirstFrame(latest, log)
 
             val commandFile = File(controlDir, COMMAND_FIFO)
@@ -105,19 +110,18 @@ internal object VirtualDisplayDaemon {
             commandFile.setWritable(true, false)
             log.write("command fifo ready")
 
-            while (true) {
-                val command = readCommand(commandFile) ?: continue
-                log.write("command=$command")
-                when (command) {
-                    "shot" -> writeFrame(controlDir, latest, log)
-                    "info" -> writeStatus(controlDir, displayId, options, state = "running")
-                    "quit" -> break
-                    else -> log.write("unknown command")
-                }
-            }
-            log.write("daemon stopping")
+            val worker = Thread(
+                { commandLoop(commandFile, controlDir, displayId, options, latest, log) },
+                "eta-virtual-display-command",
+            )
+            worker.isDaemon = true
+            worker.start()
+            // 主线程进入消息循环：systemMain 之后主 Looper 仍需要被驱动，进程也借此存活。
+            Looper.loop()
+            log.write("main looper finished")
         } catch (error: Throwable) {
-            log.writeThrowable("daemon failed", error)
+            log.write("daemon failed: ${error.javaClass.name}: ${error.message}")
+            log.write(error.stackTraceToString().take(2_000))
         } finally {
             runCatching { display?.release() }
             runCatching { reader?.close() }
@@ -126,6 +130,41 @@ internal object VirtualDisplayDaemon {
             runCatching { File(controlDir, COMMAND_FIFO).delete() }
             log.write("daemon exited")
         }
+    }
+
+    private fun commandLoop(
+        commandFile: File,
+        controlDir: File,
+        displayId: Int,
+        options: Options,
+        latest: AtomicReference<Bitmap?>,
+        log: DaemonLog,
+    ) {
+        while (true) {
+            val command = readCommand(commandFile) ?: continue
+            log.write("command=$command")
+            when (command) {
+                "shot" -> writeFrame(controlDir, latest, log)
+                "info" -> writeStatus(controlDir, displayId, options, state = "running")
+                "quit" -> {
+                    log.write("daemon stopping")
+                    Looper.getMainLooper().quitSafely()
+                    return
+                }
+                else -> log.write("unknown command")
+            }
+        }
+    }
+
+    private fun launchHome(displayId: Int, log: DaemonLog) {
+        val launched = runCatching {
+            ProcessBuilder(
+                "am", "start", "--display", displayId.toString(),
+                "-a", "android.intent.action.MAIN",
+                "-c", "android.intent.category.HOME",
+            ).redirectErrorStream(true).start().waitFor()
+        }.getOrNull()
+        log.write("home launch exit=$launched")
     }
 
     private fun awaitFirstFrame(latest: AtomicReference<Bitmap?>, log: DaemonLog) {
@@ -199,16 +238,14 @@ internal object VirtualDisplayDaemon {
         return cropped
     }
 
-    private fun bypassHiddenApiRestrictions(log: DaemonLog) {
+    private fun bypassHiddenApiRestrictions() {
         runCatching {
-            val applied = org.lsposed.hiddenapibypass.HiddenApiBypass.addHiddenApiExemptions("L")
-            log.write("hidden API exemptions applied=$applied")
-        }.onFailure { log.writeThrowable("hidden API exemption failed", it) }
+            org.lsposed.hiddenapibypass.HiddenApiBypass.addHiddenApiExemptions("L")
+        }
     }
 
     /** app_process 进程没有 Application，需要 system_server 之外的系统 Context。 */
-    private fun systemContext(log: DaemonLog): Context {
-        log.write("trying ActivityThread.systemMain")
+    private fun systemContext(): Context {
         val activityThread = Class.forName("android.app.ActivityThread")
             .getMethod("systemMain")
             .invoke(null)
@@ -222,18 +259,6 @@ internal object VirtualDisplayDaemon {
             runCatching {
                 file.appendText("[${SystemClock.elapsedRealtime()}] $line\n")
                 file.setReadable(true, false)
-            }
-        }
-
-        fun writeThrowable(prefix: String, error: Throwable) {
-            val seen = HashSet<Throwable>()
-            var current: Throwable? = error
-            var depth = 0
-            while (current != null && depth < 12 && seen.add(current)) {
-                val frames = current.stackTrace.take(12).joinToString(" | ")
-                write("$prefix cause[$depth]=${current.javaClass.name}: ${current.message.orEmpty()} stack=$frames")
-                current = current.cause
-                depth++
             }
         }
     }
