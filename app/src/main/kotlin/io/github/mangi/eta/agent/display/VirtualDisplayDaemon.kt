@@ -59,8 +59,8 @@ internal object VirtualDisplayDaemon {
         var reader: ImageReader? = null
         var frameThread: HandlerThread? = null
         try {
-            bypassHiddenApiRestrictions()
-            val context = systemContext()
+            bypassHiddenApiRestrictions(log)
+            val context = systemContext(log)
             val latest = AtomicReference<Bitmap?>(null)
             val imageReader = ImageReader.newInstance(
                 options.width,
@@ -117,7 +117,7 @@ internal object VirtualDisplayDaemon {
             }
             log.write("daemon stopping")
         } catch (error: Throwable) {
-            log.write("daemon failed: ${error.javaClass.name}: ${error.message}")
+            log.writeThrowable("daemon failed", error)
         } finally {
             runCatching { display?.release() }
             runCatching { reader?.close() }
@@ -199,14 +199,16 @@ internal object VirtualDisplayDaemon {
         return cropped
     }
 
-    private fun bypassHiddenApiRestrictions() {
+    private fun bypassHiddenApiRestrictions(log: DaemonLog) {
         runCatching {
-            org.lsposed.hiddenapibypass.HiddenApiBypass.addHiddenApiExemptions("L")
-        }
+            val applied = org.lsposed.hiddenapibypass.HiddenApiBypass.addHiddenApiExemptions("L")
+            log.write("hidden API exemptions applied=$applied")
+        }.onFailure { log.writeThrowable("hidden API exemption failed", it) }
     }
 
     /** app_process 进程没有 Application，需要 system_server 之外的系统 Context。 */
-    private fun systemContext(): Context {
+    private fun systemContext(log: DaemonLog): Context {
+        log.write("trying ActivityThread.systemMain")
         val activityThread = Class.forName("android.app.ActivityThread")
             .getMethod("systemMain")
             .invoke(null)
@@ -220,6 +222,18 @@ internal object VirtualDisplayDaemon {
             runCatching {
                 file.appendText("[${SystemClock.elapsedRealtime()}] $line\n")
                 file.setReadable(true, false)
+            }
+        }
+
+        fun writeThrowable(prefix: String, error: Throwable) {
+            val seen = HashSet<Throwable>()
+            var current: Throwable? = error
+            var depth = 0
+            while (current != null && depth < 12 && seen.add(current)) {
+                val frames = current.stackTrace.take(12).joinToString(" | ")
+                write("$prefix cause[$depth]=${current.javaClass.name}: ${current.message.orEmpty()} stack=$frames")
+                current = current.cause
+                depth++
             }
         }
     }
