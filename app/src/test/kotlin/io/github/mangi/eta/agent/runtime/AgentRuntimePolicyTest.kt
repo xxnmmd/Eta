@@ -85,7 +85,10 @@ class AgentRuntimePolicyTest {
             }
             val permissions = AgentRuntimePolicy.permissions(preferences)
             for (requested in listOf(false, true)) {
-                val config = modelConfig(false, false, false).copy(autoCompactionEnabled = requested)
+                val config = modelConfig(false, false, false).copy(
+                    contextWindow = 128_000,
+                    autoCompactionEnabled = requested,
+                )
                 assertEquals(localEnabled && requested, AgentRuntimePolicy.constrain(config, permissions).autoCompactionEnabled)
             }
         }
