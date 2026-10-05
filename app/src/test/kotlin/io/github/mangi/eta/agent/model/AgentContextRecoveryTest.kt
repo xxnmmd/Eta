@@ -15,16 +15,27 @@ class AgentContextRecoveryTest {
     )
 
     @Test
-    fun missingOrInvalidWindowFailsBeforeAnyProviderRequest() {
+    fun missingWindowStillAllowsChatButBlocksManualCompaction() {
         for (window in listOf(null, 0, -1)) {
-            val failure = assertThrows(AgentModelFailure::class.java) {
-                AgentModelClient.complete(config.copy(contextWindow = window), "继续",
+            val result = AgentModelClient.complete(config.copy(contextWindow = window), "继续",
+                AgentModelClient.ToolExecutor { error("不应执行工具") },
+                provider = provider { request, _ ->
+                    assertEquals(ProviderRequestPurpose.CHAT, request.purpose)
+                    response("完成")
+                })
+            assertEquals("完成", result.content)
+            assertNull(result.contextSnapshot)
+
+            val failure = assertThrows(AgentModelExecutionException::class.java) {
+                AgentModelClient.complete(config.copy(contextWindow = window), "",
                     AgentModelClient.ToolExecutor { error("不应执行工具") },
-                    provider = provider { _, _ -> error("未设置窗口不能请求模型") })
+                    history = history(), compactOnly = true,
+                    provider = provider { _, _ -> error("未设置窗口不能请求摘要") })
             }
-            assertEquals("CONTEXT_WINDOW_REQUIRED", failure.code)
-            assertTrue(failure.message!!.contains("设置"))
-            assertTrue(failure.message!!.contains("fixture"))
+            val cause = failure.cause as AgentModelFailure
+            assertEquals("CONTEXT_WINDOW_REQUIRED", cause.code)
+            assertTrue(cause.message!!.contains("设置"))
+            assertTrue(cause.message!!.contains("fixture"))
         }
     }
 
