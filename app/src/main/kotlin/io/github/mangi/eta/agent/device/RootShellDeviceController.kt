@@ -791,7 +791,11 @@ internal class RootShellDeviceController(
 
     private fun captureScreenshot(displayId: Int = DisplayTargetPolicy.DEFAULT_DISPLAY_ID): ScreenCapture {
         if (DisplayTargetPolicy.usesRootInput(displayId)) {
-            return captureDisplayScreenshot(displayId)
+            val viaAccessibility = captureDisplayScreenshot(displayId)
+            if (viaAccessibility.image != null) return viaAccessibility
+            // 离屏虚拟屏由 root 守护进程持有 Surface；无障碍截不到时改从守护进程取帧。
+            val viaDaemon = captureDaemonScreenshot(displayId)
+            return if (viaDaemon.image != null) viaDaemon else viaAccessibility
         }
         val excludedPackages = screenshotExcludedPackages()
         // 优先用无障碍截图：takeScreenshotOfWindow 逐窗口过滤 TYPE_ACCESSIBILITY_OVERLAY，
@@ -908,6 +912,80 @@ internal class RootShellDeviceController(
             capturedWindows = 1,
         )
     }
+
+    data class DaemonStatus(
+        val displayId: Int,
+        val width: Int,
+        val height: Int,
+        val density: Int,
+        val pid: Int,
+    )
+
+    /** 读取离屏虚拟屏守护进程的状态；没有运行中的守护进程时返回 null。 */
+    fun daemonStatus(): DaemonStatus? {
+        if (!rootAvailable()) return null
+        val result = runSuText("cat $VIRTUAL_DISPLAY_DIR/$DAEMON_STATUS_FILE", timeoutSeconds = 5)
+        if (result.exitCode != 0 || result.output.isBlank()) return null
+        return runCatching {
+            val json = JSONObject(result.output.trim())
+            DaemonStatus(
+                displayId = json.optInt("display_id", -1),
+                width = json.optInt("width", 0),
+                height = json.optInt("height", 0),
+                density = json.optInt("density", 0),
+                pid = json.optInt("pid", 0),
+            )
+        }.getOrNull()?.takeIf { it.displayId >= 0 && it.width > 0 && it.height > 0 }
+    }
+
+    /** 通过命令 FIFO 驱动守护进程（shot / info / quit）。 */
+    fun daemonSendCommand(command: String): Boolean {
+        if (!rootAvailable()) return false
+        val result = runSuText(
+            "printf '%s\\n' " + quoteForShell(command) +
+                " > $VIRTUAL_DISPLAY_DIR/$DAEMON_COMMAND_FIFO",
+            timeoutSeconds = 5,
+        )
+        return result.exitCode == 0
+    }
+
+    /** 守护进程的离屏画面：请求一帧后按文件读回，不经过无障碍截图通道。 */
+    private fun captureDaemonScreenshot(displayId: Int): ScreenCapture {
+        val status = daemonStatus() ?: return ScreenCapture.failed(source = "virtual_display")
+        if (status.displayId != displayId) return ScreenCapture.failed(source = "virtual_display")
+        val framePath = "$VIRTUAL_DISPLAY_DIR/$DAEMON_FRAME_FILE"
+        runSuText("rm -f $framePath", timeoutSeconds = 5)
+        if (!daemonSendCommand("shot")) return ScreenCapture.failed(source = "virtual_display")
+        val deadline = SystemClock.elapsedRealtime() + DAEMON_FRAME_TIMEOUT_MS
+        while (SystemClock.elapsedRealtime() < deadline) {
+            val probe = runSuText("test -s $framePath && echo eta_ready", timeoutSeconds = 5)
+            if (probe.output.contains("eta_ready")) break
+            Thread.sleep(120)
+        }
+        val bytes = runSuBytes("cat $framePath", timeoutSeconds = 8)
+        if (bytes.exitCode != 0 || bytes.output.isEmpty()) {
+            logger.warn("Agent device action=capture_screenshot outcome=failed source=virtual_display")
+            return ScreenCapture.failed(source = "virtual_display")
+        }
+        val image = runCatching { AgentImageCodec.fromScreenBytes(bytes.output, source = "screen") }
+            .getOrNull()
+            ?: return ScreenCapture.failed(source = "virtual_display")
+        logger.debug {
+            "Agent device action=capture_screenshot outcome=completed source=virtual_display " +
+                "display=$displayId image=${image.width}x${image.height} bytes=${image.bytes}"
+        }
+        return ScreenCapture(
+            image = image,
+            source = "virtual_display",
+            complete = true,
+            partial = false,
+            expectedWindows = 1,
+            capturedWindows = 1,
+        )
+    }
+
+    private fun quoteForShell(value: String): String =
+        "'" + value.replace("'", "'\\''") + "'"
 
     /** 非默认屏幕直接用无障碍的整屏截图；主屏的逐窗口过滤语义不适用于它。 */
     private fun captureDisplayScreenshot(displayId: Int): ScreenCapture {
@@ -1596,6 +1674,11 @@ internal class RootShellDeviceController(
     }
 
     companion object {
+        const val VIRTUAL_DISPLAY_DIR = "/data/local/tmp/eta/vdisplay"
+        private const val DAEMON_STATUS_FILE = "status.json"
+        private const val DAEMON_COMMAND_FIFO = "cmd"
+        private const val DAEMON_FRAME_FILE = "frame.png"
+        private const val DAEMON_FRAME_TIMEOUT_MS = 6_000L
         private const val MAX_INPUT_TEXT_CHARS = 1_000
         private const val MAX_REPLACE_TEXT_CHARS = 4_000
         private const val MAX_CLIPBOARD_TEXT_CHARS = 20_000

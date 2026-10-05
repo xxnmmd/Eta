@@ -49,11 +49,17 @@ internal object AgentDeviceToolCatalog {
             .put(
                 function(
                     "virtual_display",
-                    "创建、查询或销毁模拟副屏（需要 Root）。创建后系统会出现一块真实显示，" +
-                        "可被 observe_screen 与手势工具按 display_id 观察和操作；" +
-                        "它同时会以浮窗形式叠加在主屏上，不是完全离屏。销毁会移除全部模拟副屏。",
+                    "创建、查询或销毁虚拟屏（需要 Root）。默认 mode=offscreen：由 root 守护进程持有离屏 Surface，" +
+                        "画面不会出现在主屏上，也没有需要最小化或关闭的系统浮窗，可用 observe_screen 与手势工具按 display_id 观察和操作。" +
+                        "mode=overlay 走系统开发者选项的模拟副屏，会以浮窗叠加在主屏上。" +
+                        "destroy 会同时停止离屏守护进程并移除模拟副屏。",
                     properties(
                         "action" to enumString("动作", "create", "destroy", "status"),
+                        "mode" to enumString(
+                            "虚拟屏类型；offscreen 为离屏（默认），overlay 为系统模拟副屏",
+                            "offscreen",
+                            "overlay",
+                        ),
                         "width" to integer("虚拟屏宽度像素，200 到 2400，默认 720", 200, 2_400),
                         "height" to integer("虚拟屏高度像素，200 到 2400，默认 1280", 200, 2_400),
                         "density" to integer("虚拟屏 dpi，120 到 640，默认 320", 120, 640),

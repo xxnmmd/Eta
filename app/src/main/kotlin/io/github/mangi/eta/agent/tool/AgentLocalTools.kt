@@ -11,6 +11,7 @@ import io.github.mangi.eta.agent.device.DeviceControlUnavailableException
 import io.github.mangi.eta.agent.device.RootAccess
 import io.github.mangi.eta.agent.device.DisplayTargetPolicy
 import io.github.mangi.eta.agent.device.RootShellDeviceController
+import io.github.mangi.eta.agent.device.VirtualDisplaySpec
 import io.github.mangi.eta.agent.device.BoundedRootCommandExecutor
 import io.github.mangi.eta.agent.model.AgentModelClient
 import io.github.mangi.eta.agent.model.AgentScreenObservationContract
@@ -607,9 +608,176 @@ internal class AgentLocalTools(
             )
             .toString()
 
-    private fun virtualDisplay(args: JSONObject): String =
-        structuredDeviceTools.execute("virtual_display", args)?.content
-            ?: errorResult("UNKNOWN_TOOL", "虚拟屏工具不可用")
+    /**
+     * 虚拟屏工具。
+     *
+     * 默认 `mode=offscreen`：用 root 启动离屏守护进程，画面不合成到主屏，也就没有需要
+     * 最小化或关闭的系统浮窗；`mode=overlay` 保留开发者选项的模拟副屏作为对照。
+     */
+    private fun virtualDisplay(args: JSONObject): String {
+        val action = args.optString("action").trim().lowercase(Locale.ROOT)
+        val mode = args.optString("mode").trim().lowercase(Locale.ROOT).ifBlank { MODE_OFFSCREEN }
+        return when (action) {
+            "create" -> if (mode == MODE_OVERLAY) {
+                structuredDeviceTools.execute("virtual_display", args)?.content
+                    ?: errorResult("UNKNOWN_TOOL", "虚拟屏工具不可用")
+            } else {
+                createOffscreenVirtualDisplay(args)
+            }
+            "destroy" -> destroyVirtualDisplays()
+            "status" -> virtualDisplayStatus()
+            else -> errorResult("INVALID_ARGUMENT", "action 仅支持 create/destroy/status")
+        }
+    }
+
+    private fun createOffscreenVirtualDisplay(args: JSONObject): String {
+        val spec = VirtualDisplaySpec.normalize(
+            width = args.optNullableInt("width"),
+            height = args.optNullableInt("height"),
+            density = args.optNullableInt("density"),
+        )
+        deviceController.daemonStatus()?.let { status ->
+            return JSONObject()
+                .put("ok", true)
+                .put("tool", "virtual_display")
+                .put("action", "create")
+                .put("mode", MODE_OFFSCREEN)
+                .put("reused", true)
+                .put("display_id", status.displayId)
+                .put("width", status.width)
+                .put("height", status.height)
+                .put("density", status.density)
+                .put("message", "已有离屏虚拟屏在运行；改尺寸前先 destroy")
+                .toString()
+        }
+        val apkPath = requireContext().applicationInfo.sourceDir
+        val command = buildString {
+            append("CLASSPATH=")
+            append(quoteForShell(apkPath))
+            append(" app_process /system/bin io.github.mangi.eta.agent.display.VirtualDisplayDaemon")
+            append(" --width ").append(spec.width)
+            append(" --height ").append(spec.height)
+            append(" --density ").append(spec.density)
+            append(" --dir ").append(RootShellDeviceController.VIRTUAL_DISPLAY_DIR)
+        }
+        val started = terminalController.terminalAction(
+            action = "daemon_start",
+            command = command,
+            cwd = RootShellDeviceController.VIRTUAL_DISPLAY_DIR,
+            timeoutMs = 0,
+            identity = "root",
+            mergeStderr = false,
+            sessionId = null,
+            jobId = null,
+            async = false,
+            offsetChars = 0,
+            maxChars = 0,
+            closeIfDone = false,
+        )
+        val startJson = runCatching { JSONObject(started) }.getOrNull()
+        if (startJson?.optBoolean("ok") != true) {
+            val message = startJson?.optString("message").orEmpty()
+                .ifBlank { "无法启动离屏虚拟屏守护进程（需要 Root）" }
+            return errorResult("VIRTUAL_DISPLAY_START_FAILED", message)
+        }
+        startJson.optString("task_id").takeIf { it.isNotBlank() }?.let { taskId ->
+            rootCommandExecutor.execute(
+                "printf '%s\n' " + quoteForShell(taskId) + " > " +
+                    RootShellDeviceController.VIRTUAL_DISPLAY_DIR + "/task_id",
+                timeoutMillis = 5_000,
+            )
+        }
+        val deadline = SystemClock.elapsedRealtime() + OFFSCREEN_READY_TIMEOUT_MS
+        while (SystemClock.elapsedRealtime() < deadline) {
+            deviceController.daemonStatus()?.let { status ->
+                return JSONObject()
+                    .put("ok", true)
+                    .put("tool", "virtual_display")
+                    .put("action", "create")
+                    .put("mode", MODE_OFFSCREEN)
+                    .put("reused", false)
+                    .put("display_id", status.displayId)
+                    .put("width", status.width)
+                    .put("height", status.height)
+                    .put("density", status.density)
+                    .put("note", "离屏虚拟屏不会出现在主屏上；用 list_displays 或 observe_screen 的 displays 读取 display_id")
+                    .toString()
+            }
+            Thread.sleep(300)
+        }
+        return errorResult(
+            "VIRTUAL_DISPLAY_TIMEOUT",
+            "离屏虚拟屏未在时限内就绪；可查看 " +
+                RootShellDeviceController.VIRTUAL_DISPLAY_DIR + "/daemon.log",
+        )
+    }
+
+    private fun destroyVirtualDisplays(): String {
+        val daemonRunning = deviceController.daemonStatus() != null
+        val quitSent = if (daemonRunning) deviceController.daemonSendCommand("quit") else false
+        val taskId = rootCommandExecutor
+            .execute(
+                "cat " + RootShellDeviceController.VIRTUAL_DISPLAY_DIR + "/task_id",
+                timeoutMillis = 5_000,
+            )
+            .let { result -> if (result.ok) result.stdout.trim() else "" }
+        val taskStopped = taskId.takeIf { it.isNotBlank() }?.let { id ->
+            terminalController.terminalAction(
+                action = "daemon_stop",
+                command = "",
+                cwd = null,
+                timeoutMs = 0,
+                identity = "root",
+                mergeStderr = false,
+                sessionId = null,
+                jobId = null,
+                async = false,
+                offsetChars = 0,
+                maxChars = 0,
+                closeIfDone = false,
+                taskId = id,
+            )
+            true
+        } ?: false
+        rootCommandExecutor.execute(
+            "rm -f " + RootShellDeviceController.VIRTUAL_DISPLAY_DIR + "/task_id " +
+                RootShellDeviceController.VIRTUAL_DISPLAY_DIR + "/frame.png",
+            timeoutMillis = 5_000,
+        )
+        val overlay = structuredDeviceTools
+            .execute("virtual_display", JSONObject().put("action", "destroy"))
+            ?.content
+        return JSONObject()
+            .put("ok", true)
+            .put("tool", "virtual_display")
+            .put("action", "destroy")
+            .put("offscreen_running_before", daemonRunning)
+            .put("offscreen_quit_sent", quitSent)
+            .put("offscreen_task_stopped", taskStopped)
+            .put("overlay_result", overlay ?: JSONObject.NULL)
+            .toString()
+    }
+
+    private fun virtualDisplayStatus(): String {
+        val status = deviceController.daemonStatus()
+        val overlay = structuredDeviceTools
+            .execute("virtual_display", JSONObject().put("action", "status"))
+            ?.content
+        return JSONObject()
+            .put("ok", true)
+            .put("tool", "virtual_display")
+            .put("action", "status")
+            .put("offscreen_running", status != null)
+            .put("offscreen_display_id", status?.displayId ?: JSONObject.NULL)
+            .put("offscreen_width", status?.width ?: JSONObject.NULL)
+            .put("offscreen_height", status?.height ?: JSONObject.NULL)
+            .put("offscreen_density", status?.density ?: JSONObject.NULL)
+            .put("overlay", overlay ?: JSONObject.NULL)
+            .toString()
+    }
+
+    private fun quoteForShell(value: String): String =
+        "'" + value.replace("'", "'\\''") + "'"
 
     private fun convertPoint(
         x: Int,
@@ -1387,6 +1555,10 @@ internal class AgentLocalTools(
     )
 
     private companion object {
+        const val MODE_OFFSCREEN = "offscreen"
+        const val MODE_OVERLAY = "overlay"
+        const val OFFSCREEN_READY_TIMEOUT_MS = 15_000L
+
         val DEVICE_DIRECT_TOOL_NAMES = setOf(
             "set_alarm",
             "set_timer",

@@ -59,3 +59,6 @@
 # 不在 App 层重复保留整个类或包，避免阻断裁剪、内联和混淆。
 # 保留源码与行号属性，便于使用 release mapping 还原线上堆栈。
 -keepattributes SourceFile,LineNumberTable
+
+# 离屏虚拟屏守护进程由 root 通过 app_process 反射启动，必须保留类名与入口方法。
+-keep class io.github.mangi.eta.agent.display.VirtualDisplayDaemon { *; }
