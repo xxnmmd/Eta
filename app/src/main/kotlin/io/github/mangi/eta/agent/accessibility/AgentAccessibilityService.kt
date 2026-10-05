@@ -235,7 +235,9 @@ class AgentAccessibilityService : AccessibilityService() {
         val holder = java.util.concurrent.atomic.AtomicReference<Bitmap?>(null)
         val failure = java.util.concurrent.atomic.AtomicInteger(0)
         val submitted = runCatching {
-            takeScreenshotOfDisplay(displayId, screenshotExecutor, object : TakeScreenshotCallback {
+            // 公开 API 只有 takeScreenshot(displayId, ...)；takeScreenshotOfDisplay 在 SDK 37 中不存在。
+            @Suppress("DEPRECATION")
+            takeScreenshot(displayId, screenshotExecutor, object : TakeScreenshotCallback {
                 override fun onSuccess(screenshot: ScreenshotResult) {
                     holder.set(runCatching { convertToSoftwareBitmap(screenshot) }.getOrNull())
                     latch.countDown()
