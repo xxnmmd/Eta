@@ -9,11 +9,13 @@ internal object AgentScreenObservationContract {
     const val DEFAULT_MAX_NODES = 60
     const val MIN_MAX_NODES = 1
     const val MAX_MAX_NODES = 120
+    const val DEFAULT_DISPLAY_ID = 0
 
     data class Options(
         val includeScreenshot: Boolean,
         val includeUiTree: Boolean,
         val maxNodes: Int,
+        val displayId: Int = DEFAULT_DISPLAY_ID,
     )
 
     fun resolve(arguments: JSONObject): Options = Options(
@@ -26,5 +28,6 @@ internal object AgentScreenObservationContract {
             DEFAULT_INCLUDE_UI_TREE,
         ),
         maxNodes = arguments.optInt("max_nodes", DEFAULT_MAX_NODES),
+        displayId = arguments.optInt("display_id", DEFAULT_DISPLAY_ID),
     )
 }

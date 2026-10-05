@@ -122,6 +122,7 @@ internal object AgentContextAppToolCatalog {
                                         .put("default", AgentScreenObservationContract.DEFAULT_MAX_NODES)
                                         .put("description", "最多返回 1 到 120 个 UI 节点，默认 60")
                                 )
+                                .put("display_id", AgentToolSchema.displayId())
                         )
                 )
             )

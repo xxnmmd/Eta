@@ -9,6 +9,7 @@ import android.os.SystemClock
 import io.github.mangi.eta.agent.browser.AgentBrowserSession
 import io.github.mangi.eta.agent.device.DeviceControlUnavailableException
 import io.github.mangi.eta.agent.device.RootAccess
+import io.github.mangi.eta.agent.device.DisplayTargetPolicy
 import io.github.mangi.eta.agent.device.RootShellDeviceController
 import io.github.mangi.eta.agent.device.BoundedRootCommandExecutor
 import io.github.mangi.eta.agent.model.AgentModelClient
@@ -377,6 +378,7 @@ internal class AgentLocalTools(
                 includeScreenshot = options.includeScreenshot,
                 includeUiTree = options.includeUiTree,
                 maxNodes = options.maxNodes,
+                displayId = options.displayId,
             )
         publishedObservation.set(
             PublishedObservation(
@@ -398,14 +400,18 @@ internal class AgentLocalTools(
     }
 
     private fun tap(args: JSONObject): String {
+        val displayId = DisplayTargetPolicy.normalize(args.optNullableInt("display_id"))
         val point = convertPoint(
             x = args.optInt("x"),
             y = args.optInt("y"),
-            coordinateSpace = args.optString("coordinate_space")
+            coordinateSpace = args.optString("coordinate_space"),
+            displayId = displayId,
         )
-        AgentHapticFeedback.perform(context, AgentHapticFeedback.Type.TAP)
-        showTap(point.x, point.y)
-        return deviceController.tap(point.x, point.y)
+        if (!DisplayTargetPolicy.usesRootInput(displayId)) {
+            AgentHapticFeedback.perform(context, AgentHapticFeedback.Type.TAP)
+            showTap(point.x, point.y)
+        }
+        return deviceController.tap(point.x, point.y, displayId)
     }
 
     private fun tapArea(args: JSONObject): String {
@@ -414,15 +420,18 @@ internal class AgentLocalTools(
         val x2 = args.optInt("x2")
         val y2 = args.optInt("y2")
         val coordinateSpace = args.optString("coordinate_space")
-        val first = convertPoint(x1, y1, coordinateSpace)
-        val second = convertPoint(x2, y2, coordinateSpace)
+        val displayId = DisplayTargetPolicy.normalize(args.optNullableInt("display_id"))
+        val first = convertPoint(x1, y1, coordinateSpace, displayId)
+        val second = convertPoint(x2, y2, coordinateSpace, displayId)
         val point = ScreenPoint(
             x = ((first.x.toLong() + second.x.toLong()) / 2L).toInt(),
             y = ((first.y.toLong() + second.y.toLong()) / 2L).toInt(),
         )
-        AgentHapticFeedback.perform(context, AgentHapticFeedback.Type.TAP)
-        showTap(point.x, point.y)
-        return deviceController.tap(point.x, point.y)
+        if (!DisplayTargetPolicy.usesRootInput(displayId)) {
+            AgentHapticFeedback.perform(context, AgentHapticFeedback.Type.TAP)
+            showTap(point.x, point.y)
+        }
+        return deviceController.tap(point.x, point.y, displayId)
     }
 
     private fun tapElement(args: JSONObject): String {
@@ -457,37 +466,47 @@ internal class AgentLocalTools(
     }
 
     private fun longPress(args: JSONObject): String {
+        val displayId = DisplayTargetPolicy.normalize(args.optNullableInt("display_id"))
         val point = convertPoint(
             x = args.optInt("x"),
             y = args.optInt("y"),
-            coordinateSpace = args.optString("coordinate_space")
+            coordinateSpace = args.optString("coordinate_space"),
+            displayId = displayId,
         )
         val durationMs = args.optInt("duration_ms", 800)
-        AgentHapticFeedback.perform(context, AgentHapticFeedback.Type.LONG_PRESS)
-        showLongPress(point.x, point.y, durationMs)
-        return deviceController.longPress(point.x, point.y, durationMs)
+        if (!DisplayTargetPolicy.usesRootInput(displayId)) {
+            AgentHapticFeedback.perform(context, AgentHapticFeedback.Type.LONG_PRESS)
+            showLongPress(point.x, point.y, durationMs)
+        }
+        return deviceController.longPress(point.x, point.y, durationMs, displayId)
     }
 
     private fun swipe(args: JSONObject): String {
+        val displayId = DisplayTargetPolicy.normalize(args.optNullableInt("display_id"))
         val start = convertPoint(
             x = args.optInt("x1"),
             y = args.optInt("y1"),
-            coordinateSpace = args.optString("coordinate_space")
+            coordinateSpace = args.optString("coordinate_space"),
+            displayId = displayId,
         )
         val end = convertPoint(
             x = args.optInt("x2"),
             y = args.optInt("y2"),
-            coordinateSpace = args.optString("coordinate_space")
+            coordinateSpace = args.optString("coordinate_space"),
+            displayId = displayId,
         )
         val durationMs = args.optInt("duration_ms", 500)
-        AgentHapticFeedback.perform(context, AgentHapticFeedback.Type.SWIPE)
-        showSwipe(start.x, start.y, end.x, end.y, durationMs)
+        if (!DisplayTargetPolicy.usesRootInput(displayId)) {
+            AgentHapticFeedback.perform(context, AgentHapticFeedback.Type.SWIPE)
+            showSwipe(start.x, start.y, end.x, end.y, durationMs)
+        }
         return deviceController.swipe(
             start.x,
             start.y,
             end.x,
             end.y,
-            durationMs
+            durationMs,
+            displayId,
         )
     }
 
@@ -559,9 +578,23 @@ internal class AgentLocalTools(
             timeoutMs = args.optInt("timeout_ms", 10_000)
         )
 
-    private fun convertPoint(x: Int, y: Int, coordinateSpace: String): ScreenPoint {
+    private fun convertPoint(
+        x: Int,
+        y: Int,
+        coordinateSpace: String,
+        displayId: Int = DisplayTargetPolicy.DEFAULT_DISPLAY_ID,
+    ): ScreenPoint {
         val space = publishedObservation.get().coordinateSpace
         val requestedSpace = coordinateSpace.trim().lowercase(Locale.ROOT)
+        if (DisplayTargetPolicy.usesRootInput(displayId)) {
+            val (width, height) = deviceController.displayDimensions(displayId)
+            if (!DisplayTargetPolicy.pointWithin(x, y, width, height)) {
+                throw InvalidToolArgumentException(
+                    "屏幕坐标超出范围：($x,$y) not in ${width}x$height (display $displayId)",
+                )
+            }
+            return ScreenPoint(x, y)
+        }
         if (requestedSpace == "screen" || (requestedSpace.isBlank() && space == null)) {
             val (width, height) = space?.let { it.screenWidth to it.screenHeight }
                 ?: deviceController.screenDimensions()

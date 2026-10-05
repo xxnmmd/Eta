@@ -20,7 +20,10 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.os.Looper
 import android.os.PersistableBundle
+import android.hardware.display.DisplayManager
 import android.os.SystemClock
+import android.util.DisplayMetrics
+import android.view.Display
 import android.view.View
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
@@ -137,9 +140,19 @@ class AgentAccessibilityService : AccessibilityService() {
      * 一次观察与其节点句柄组成不可变快照。调用方必须把同一实例传回节点动作，
      * 避免其他运行或 wait_for_text 的临时观察改写 index 含义。
      */
-    fun captureNodeSnapshot(maxNodes: Int): NodeSnapshot? = runOnMainSync {
+    fun captureNodeSnapshot(maxNodes: Int): NodeSnapshot? =
+        captureNodeSnapshot(maxNodes, Display.DEFAULT_DISPLAY)
+
+    /**
+     * 指定屏幕的节点快照。主屏沿用 rootInActiveWindow；其他屏幕取该屏最上层应用窗口的根节点。
+     */
+    fun captureNodeSnapshot(maxNodes: Int, displayId: Int): NodeSnapshot? = runOnMainSync {
         val startedAt = SystemClock.elapsedRealtime()
-        val root = rootInActiveWindow ?: return@runOnMainSync null
+        val root = if (displayId == Display.DEFAULT_DISPLAY) {
+            rootInActiveWindow
+        } else {
+            topWindowRoot(displayId)
+        } ?: return@runOnMainSync null
         val nodeLimit = maxNodes.coerceIn(1, 120)
         val indexedNodes = mutableListOf<IndexedNode>()
         val traversal = NodeTraversalState(
@@ -175,6 +188,79 @@ class AgentAccessibilityService : AccessibilityService() {
     /** 临时查询不发布任何全局节点状态，适用于 wait_for_text。 */
     fun queryNodes(maxNodes: Int): List<UiNode> =
         captureNodeSnapshot(maxNodes)?.nodes.orEmpty()
+
+    /** 可用的物理屏与虚拟屏描述；虚拟屏由系统或 root 侧创建。 */
+    data class DisplayDescriptor(
+        val id: Int,
+        val width: Int,
+        val height: Int,
+        val name: String,
+        val isDefault: Boolean,
+    )
+
+    fun displayDescriptors(): List<DisplayDescriptor> = runOnMainSync {
+        val manager = getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager
+            ?: return@runOnMainSync emptyList()
+        manager.displays.orEmpty().mapNotNull { display ->
+            val metrics = DisplayMetrics()
+            @Suppress("DEPRECATION")
+            display.getRealMetrics(metrics)
+            if (metrics.widthPixels <= 0 || metrics.heightPixels <= 0) return@mapNotNull null
+            DisplayDescriptor(
+                id = display.displayId,
+                width = metrics.widthPixels,
+                height = metrics.heightPixels,
+                name = display.name.orEmpty(),
+                isDefault = display.displayId == Display.DEFAULT_DISPLAY,
+            )
+        }
+    } ?: emptyList()
+
+    private fun topWindowRoot(displayId: Int): AccessibilityNodeInfo? {
+        val windows = runCatching { getWindowsOnAllDisplays()[displayId] }.getOrNull().orEmpty()
+        if (windows.isEmpty()) return null
+        return windows.asSequence()
+            .filter { it.type == AccessibilityWindowInfo.TYPE_APPLICATION }
+            .maxByOrNull { it.layer }
+            ?.root
+            ?: windows.maxByOrNull { it.layer }?.root
+    }
+
+    /** 指定屏幕的截图；主屏仍走逐窗口合并以排除 Eta 自有浮层。 */
+    fun captureDisplayScreenshot(displayId: Int): ScreenshotCaptureResult {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            return ScreenshotCaptureResult.unavailable()
+        }
+        val latch = CountDownLatch(1)
+        val holder = java.util.concurrent.atomic.AtomicReference<Bitmap?>(null)
+        val failure = java.util.concurrent.atomic.AtomicInteger(0)
+        val submitted = runCatching {
+            takeScreenshotOfDisplay(displayId, screenshotExecutor, object : TakeScreenshotCallback {
+                override fun onSuccess(screenshot: ScreenshotResult) {
+                    holder.set(runCatching { convertToSoftwareBitmap(screenshot) }.getOrNull())
+                    latch.countDown()
+                }
+
+                override fun onFailure(errorCode: Int) {
+                    failure.set(errorCode)
+                    latch.countDown()
+                }
+            })
+        }.isSuccess
+        if (!submitted) return ScreenshotCaptureResult.unavailable()
+        val completed = runCatching { latch.await(2, TimeUnit.SECONDS) }.getOrDefault(false)
+        val bitmap = holder.get()
+        return ScreenshotCaptureResult(
+            bitmap = bitmap,
+            complete = completed && bitmap != null,
+            expectedWindows = 1,
+            capturedWindows = if (bitmap != null) 1 else 0,
+            missingWindowIds = if (bitmap == null) listOf(displayId) else emptyList(),
+            failureCodes = if (bitmap == null && failure.get() != 0) mapOf(displayId to failure.get()) else emptyMap(),
+            timedOut = !completed,
+            criticalWindowMissing = bitmap == null,
+        )
+    }
 
     fun currentPackageName(): String? =
         rootInActiveWindow?.packageName?.toString()

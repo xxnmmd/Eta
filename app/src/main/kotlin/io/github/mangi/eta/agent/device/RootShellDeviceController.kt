@@ -41,6 +41,7 @@ internal class RootShellDeviceController(
         val maxNodes: Int,
         val truncated: Boolean,
         val treeSignature: String = "",
+        val displayId: Int = DisplayTargetPolicy.DEFAULT_DISPLAY_ID,
         internal val accessibilitySnapshot: AgentAccessibilityService.NodeSnapshot? = null,
     )
 
@@ -73,6 +74,14 @@ internal class RootShellDeviceController(
 
     fun screenDimensions(): Pair<Int, Int> = screenSize()
 
+    data class DisplayInfo(
+        val id: Int,
+        val width: Int,
+        val height: Int,
+        val name: String,
+        val isDefault: Boolean,
+    )
+
     data class UiNode(
         val index: Int,
         val text: String,
@@ -93,14 +102,24 @@ internal class RootShellDeviceController(
         val centerY: Int get() = bounds.centerY()
     }
 
-    fun observe(includeScreenshot: Boolean, includeUiTree: Boolean, maxNodes: Int): Observation {
+    fun observe(
+        includeScreenshot: Boolean,
+        includeUiTree: Boolean,
+        maxNodes: Int,
+        displayId: Int = DisplayTargetPolicy.DEFAULT_DISPLAY_ID,
+    ): Observation {
         val accessibility = AgentAccessibilityService.current()
         if (accessibility == null && !rootAvailable()) {
             return Observation(accessibilityUnavailable(), null, null, null)
         }
+        val targetDisplay = DisplayTargetPolicy.normalize(displayId)
+        val displays = displayInfos()
+        if (!displays.any { it.id == targetDisplay }) {
+            return Observation(displayUnavailable(targetDisplay, displays), null, null, null)
+        }
         val nodeLimit = maxNodes.coerceIn(1, 120)
-        val display = screenSize()
-        val focus = accessibility
+        val display = displayDimensions(targetDisplay)
+        var focus = accessibility
             ?.currentPackageName()
             ?.takeIf { it.isNotBlank() }
             ?.let { packageName ->
@@ -111,7 +130,7 @@ internal class RootShellDeviceController(
             }
             ?: focusedWindow()
         val elementObservation = if (includeUiTree) {
-            val accessibilitySnapshot = accessibility?.captureNodeSnapshot(nodeLimit)
+            val accessibilitySnapshot = accessibility?.captureNodeSnapshot(nodeLimit, targetDisplay)
             if (accessibilitySnapshot != null) {
                 ElementObservation(
                     id = accessibilitySnapshot.id,
@@ -121,9 +140,10 @@ internal class RootShellDeviceController(
                     nodes = accessibilitySnapshot.nodes.map { it.toUiNode() },
                     maxNodes = nodeLimit,
                     truncated = accessibilitySnapshot.truncated,
+                    displayId = targetDisplay,
                     accessibilitySnapshot = accessibilitySnapshot,
                 )
-            } else if (rootAvailable()) {
+            } else if (rootAvailable() && targetDisplay == DisplayTargetPolicy.DEFAULT_DISPLAY_ID) {
                 val rootNodes = dumpUiNodes(nodeLimit)
                 ElementObservation(
                     id = "u${ROOT_OBSERVATION_IDS.incrementAndGet()}",
@@ -141,8 +161,19 @@ internal class RootShellDeviceController(
         } else {
             null
         }
+        if (targetDisplay != DisplayTargetPolicy.DEFAULT_DISPLAY_ID) {
+            focus = JSONObject()
+                .put("package", elementObservation?.packageName.orEmpty())
+                .put("component", elementObservation?.packageName.orEmpty())
+                .put("source", "accessibility")
+                .put("display_id", targetDisplay)
+        }
         val nodes = elementObservation?.nodes.orEmpty()
-        val capture = if (includeScreenshot) captureScreenshot() else ScreenCapture.notRequested()
+        val capture = if (includeScreenshot) {
+            captureScreenshot(targetDisplay)
+        } else {
+            ScreenCapture.notRequested()
+        }
         val image = capture.image
         val coordinateSpace = if (image?.width != null && image.height != null) {
             CoordinateSpace(
@@ -203,6 +234,8 @@ internal class RootShellDeviceController(
                 }
             )
             .put("focus", focus)
+            .put("display_id", targetDisplay)
+            .put("displays", displays.toJsonArray())
             .put("observation_id", elementObservation?.id ?: JSONObject.NULL)
             .put("observation_source", elementObservation?.source?.wireName ?: JSONObject.NULL)
             .put("window_id", elementObservation?.windowId ?: JSONObject.NULL)
@@ -225,9 +258,14 @@ internal class RootShellDeviceController(
         return Observation(json.toString(), image, elementObservation, coordinateSpace)
     }
 
-    fun tap(x: Int, y: Int): String {
+    fun tap(x: Int, y: Int, displayId: Int = DisplayTargetPolicy.DEFAULT_DISPLAY_ID): String {
+        val targetDisplay = DisplayTargetPolicy.normalize(displayId)
+        if (DisplayTargetPolicy.usesRootInput(targetDisplay)) {
+            validatePoint(x, y, targetDisplay)
+            return inputCommand("input -d $targetDisplay tap $x $y", "tap")
+        }
         if (AgentAccessibilityService.current() == null && !rootAvailable()) return accessibilityUnavailable()
-        validatePoint(x, y)
+        validatePoint(x, y, targetDisplay)
         AgentAccessibilityService.current()?.let { service ->
             val result = service.gestureTap(x.toFloat(), y.toFloat())
             if (result.ok) {
@@ -242,9 +280,20 @@ internal class RootShellDeviceController(
         return inputCommand("input tap $x $y", "tap")
     }
 
-    fun longPress(x: Int, y: Int, durationMs: Int): String {
+    fun longPress(
+        x: Int,
+        y: Int,
+        durationMs: Int,
+        displayId: Int = DisplayTargetPolicy.DEFAULT_DISPLAY_ID,
+    ): String {
+        val targetDisplay = DisplayTargetPolicy.normalize(displayId)
+        if (DisplayTargetPolicy.usesRootInput(targetDisplay)) {
+            validatePoint(x, y, targetDisplay)
+            val duration = durationMs.coerceIn(300, 3_000)
+            return inputCommand("input -d $targetDisplay swipe $x $y $x $y $duration", "long_press")
+        }
         if (AgentAccessibilityService.current() == null && !rootAvailable()) return accessibilityUnavailable()
-        validatePoint(x, y)
+        validatePoint(x, y, targetDisplay)
         val duration = durationMs.coerceIn(300, 3_000)
         AgentAccessibilityService.current()?.let { service ->
             val result = service.gestureTap(x.toFloat(), y.toFloat(), duration.toLong())
@@ -260,10 +309,24 @@ internal class RootShellDeviceController(
         return inputCommand("input swipe $x $y $x $y $duration", "long_press")
     }
 
-    fun swipe(x1: Int, y1: Int, x2: Int, y2: Int, durationMs: Int): String {
+    fun swipe(
+        x1: Int,
+        y1: Int,
+        x2: Int,
+        y2: Int,
+        durationMs: Int,
+        displayId: Int = DisplayTargetPolicy.DEFAULT_DISPLAY_ID,
+    ): String {
+        val targetDisplay = DisplayTargetPolicy.normalize(displayId)
+        if (DisplayTargetPolicy.usesRootInput(targetDisplay)) {
+            validatePoint(x1, y1, targetDisplay)
+            validatePoint(x2, y2, targetDisplay)
+            val duration = durationMs.coerceIn(100, 2_000)
+            return inputCommand("input -d $targetDisplay swipe $x1 $y1 $x2 $y2 $duration", "swipe")
+        }
         if (AgentAccessibilityService.current() == null && !rootAvailable()) return accessibilityUnavailable()
-        validatePoint(x1, y1)
-        validatePoint(x2, y2)
+        validatePoint(x1, y1, targetDisplay)
+        validatePoint(x2, y2, targetDisplay)
         val duration = durationMs.coerceIn(100, 2_000)
         AgentAccessibilityService.current()?.let { service ->
             val result = service.gestureSwipe(
@@ -702,7 +765,10 @@ internal class RootShellDeviceController(
         return inputCommand(command, "open_system_panel")
     }
 
-    private fun captureScreenshot(): ScreenCapture {
+    private fun captureScreenshot(displayId: Int = DisplayTargetPolicy.DEFAULT_DISPLAY_ID): ScreenCapture {
+        if (DisplayTargetPolicy.usesRootInput(displayId)) {
+            return captureDisplayScreenshot(displayId)
+        }
         val excludedPackages = screenshotExcludedPackages()
         // 优先用无障碍截图：takeScreenshotOfWindow 逐窗口过滤 TYPE_ACCESSIBILITY_OVERLAY，
         // 天然排除浮层（glow/orb/bubble 等），对 Agent 透明
@@ -816,6 +882,46 @@ internal class RootShellDeviceController(
             partial = false,
             expectedWindows = 1,
             capturedWindows = 1,
+        )
+    }
+
+    /** 非默认屏幕直接用无障碍的整屏截图；主屏的逐窗口过滤语义不适用于它。 */
+    private fun captureDisplayScreenshot(displayId: Int): ScreenCapture {
+        val service = AgentAccessibilityService.current()
+            ?: return ScreenCapture.failed(source = "accessibility_display")
+        val startedAt = SystemClock.elapsedRealtime()
+        val result = runCatching { service.captureDisplayScreenshot(displayId) }.getOrNull()
+        val bitmap = result?.bitmap ?: return ScreenCapture.failed(source = "accessibility_display")
+        val capturedAt = SystemClock.elapsedRealtime()
+        val image = try {
+            runCatching { AgentImageCodec.fromScreenBitmap(bitmap, source = "screen") }
+                .onFailure { throwable ->
+                    logger.warn(
+                        "Agent device action=encode_screenshot outcome=failed " +
+                            "source=accessibility_display type=${throwable.javaClass.simpleName}"
+                    )
+                }
+                .getOrNull()
+        } finally {
+            bitmap.recycle()
+        }
+        if (image == null || image.bytes <= 0) return ScreenCapture.failed(source = "accessibility_display")
+        logger.debug {
+            "Agent device action=capture_screenshot outcome=completed source=accessibility_display " +
+                "display=$displayId capture_ms=${capturedAt - startedAt} " +
+                "image=${image.width}x${image.height} bytes=${image.bytes}"
+        }
+        return ScreenCapture(
+            image = image,
+            source = "accessibility_display",
+            complete = result.complete,
+            partial = result.partial,
+            expectedWindows = result.expectedWindows,
+            capturedWindows = result.capturedWindows,
+            missingWindowIds = result.missingWindowIds,
+            failureCodes = result.failureCodes,
+            timedOut = result.timedOut,
+            criticalWindowMissing = result.criticalWindowMissing,
         )
     }
 
@@ -1093,12 +1199,55 @@ internal class RootShellDeviceController(
         Thread.sleep(delayMs)
     }
 
-    private fun validatePoint(x: Int, y: Int) {
-        val (width, height) = screenSize()
-        require(x in 0 until width && y in 0 until height) {
-            "坐标超出屏幕范围：($x,$y) not in ${width}x$height"
+    private fun validatePoint(x: Int, y: Int, displayId: Int = DisplayTargetPolicy.DEFAULT_DISPLAY_ID) {
+        val (width, height) = displayDimensions(displayId)
+        require(DisplayTargetPolicy.pointWithin(x, y, width, height)) {
+            "坐标超出屏幕范围：($x,$y) not in ${width}x$height (display $displayId)"
         }
     }
+
+    /** 设备当前可见的屏幕列表；虚拟屏由系统或 root 侧创建。 */
+    fun displayInfos(): List<DisplayInfo> =
+        AgentAccessibilityService.current()?.displayDescriptors().orEmpty().map { descriptor ->
+            DisplayInfo(
+                id = descriptor.id,
+                width = descriptor.width,
+                height = descriptor.height,
+                name = descriptor.name,
+                isDefault = descriptor.isDefault,
+            )
+        }
+
+    fun displayDimensions(displayId: Int = DisplayTargetPolicy.DEFAULT_DISPLAY_ID): Pair<Int, Int> {
+        val targetDisplay = DisplayTargetPolicy.normalize(displayId)
+        if (targetDisplay == DisplayTargetPolicy.DEFAULT_DISPLAY_ID) return screenSize()
+        val info = displayInfos().firstOrNull { it.id == targetDisplay }
+            ?: throw DeviceControlUnavailableException()
+        return info.width to info.height
+    }
+
+    private fun displayUnavailable(displayId: Int, displays: List<DisplayInfo>): String =
+        JSONObject()
+            .put("ok", false)
+            .put("code", "DISPLAY_UNAVAILABLE")
+            .put("message", "屏幕 $displayId 不存在或不可访问；可用屏幕见 displays")
+            .put("display_id", displayId)
+            .put("displays", displays.toJsonArray())
+            .toString()
+
+    private fun List<DisplayInfo>.toJsonArray(): JSONArray =
+        JSONArray().also { array ->
+            forEach { info ->
+                array.put(
+                    JSONObject()
+                        .put("id", info.id)
+                        .put("width", info.width)
+                        .put("height", info.height)
+                        .put("name", info.name)
+                        .put("is_default", info.isDefault),
+                )
+            }
+        }
 
     private fun List<UiNode>.toJsonArray(): JSONArray =
         JSONArray().also { array ->
