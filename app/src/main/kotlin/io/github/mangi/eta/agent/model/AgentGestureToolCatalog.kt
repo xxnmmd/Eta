@@ -162,6 +162,7 @@ internal object AgentGestureToolCatalog {
                                         .put("type", "string")
                                         .put("enum", JSONArray().put("up").put("down").put("left").put("right"))
                                 )
+                                .put("display_id", AgentToolSchema.displayId())
                         )
                         .put("required", JSONArray().put("direction"))
                 )

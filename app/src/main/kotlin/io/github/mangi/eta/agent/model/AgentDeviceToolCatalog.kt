@@ -46,6 +46,21 @@ internal object AgentDeviceToolCatalog {
                     "duration_seconds",
                 ),
             )
+            .put(
+                function(
+                    "virtual_display",
+                    "创建、查询或销毁模拟副屏（需要 Root）。创建后系统会出现一块真实显示，" +
+                        "可被 observe_screen 与手势工具按 display_id 观察和操作；" +
+                        "它同时会以浮窗形式叠加在主屏上，不是完全离屏。销毁会移除全部模拟副屏。",
+                    properties(
+                        "action" to enumString("动作", "create", "destroy", "status"),
+                        "width" to integer("虚拟屏宽度像素，200 到 2400，默认 720", 200, 2_400),
+                        "height" to integer("虚拟屏高度像素，200 到 2400，默认 1280", 200, 2_400),
+                        "density" to integer("虚拟屏 dpi，120 到 640，默认 320", 120, 640),
+                    ),
+                    "action",
+                ),
+            )
             .put(emptyFunction("device_status", "读取电池、内存、存储、系统版本与开机时长。"))
             .put(emptyFunction("network_info", "读取当前联网方式、联网验证状态和当前 Wi‑Fi 基本信息，不返回保存的密码。"))
             .put(limitFunction("top_memory_apps", "按当前 RSS 列出内存占用最高的进程。"))

@@ -19,6 +19,7 @@ import android.provider.Settings
 import android.view.KeyEvent
 import io.github.mangi.eta.agent.device.BoundedRootCommandExecutor
 import io.github.mangi.eta.agent.device.RootAccess
+import io.github.mangi.eta.agent.device.VirtualDisplaySpec
 import io.github.mangi.eta.agent.model.AgentModelClient
 import io.github.mangi.eta.core.AgentLogger
 import io.github.mangi.eta.agent.device.AgentNotificationHistoryService
@@ -66,6 +67,7 @@ internal class AgentStructuredDeviceTools(
             "set_setting" -> text(setSetting(args))
             "set_device_state" -> text(setDeviceState(args))
             "app_state_control" -> text(appStateControl(args))
+            "virtual_display" -> text(virtualDisplay(args))
             else -> null
         }
 
@@ -385,6 +387,60 @@ internal class AgentStructuredDeviceTools(
         }
         return rootMutationResult("app_state_control", root.execute(command))
     }
+
+    /** 模拟副屏：系统会建立真实显示，可被无障碍观察与 root 输入驱动，同时以浮窗叠加在主屏上。 */
+    private fun virtualDisplay(args: JSONObject): String {
+        return when (args.optString("action").trim().lowercase(Locale.ROOT)) {
+            "status" -> {
+                val result = root.execute(
+                    "settings get global overlay_display_devices",
+                    timeoutMillis = 5_000,
+                )
+                if (!result.ok) return rootError(result)
+                val raw = result.stdout.trim().takeIf { it.isNotEmpty() && it != "null" }
+                ok("virtual_display")
+                    .put("action", "status")
+                    .put("active", raw != null)
+                    .put("settings_value", raw ?: JSONObject.NULL)
+                    .put("specs", JSONArray().also { array ->
+                        VirtualDisplaySpec.parse(raw).forEach { spec -> array.put(spec.toJson()) }
+                    })
+                    .toString()
+            }
+            "create" -> {
+                val spec = VirtualDisplaySpec.normalize(
+                    width = optionalInt(args, "width"),
+                    height = optionalInt(args, "height"),
+                    density = optionalInt(args, "density"),
+                )
+                val result = root.execute(
+                    "settings put global overlay_display_devices " +
+                        shellQuote(VirtualDisplaySpec.settingsValue(spec)),
+                    timeoutMillis = 5_000,
+                )
+                if (!result.ok) return rootError(result)
+                ok("virtual_display")
+                    .put("action", "create")
+                    .put("spec", spec.toJson())
+                    .put("settings_value", VirtualDisplaySpec.settingsValue(spec))
+                    .put("note", "屏幕会在数秒内出现；用 list_displays 或 observe_screen 的 displays 读取 display_id，" +
+                        "它同时会以浮窗形式叠加在主屏上")
+                    .toString()
+            }
+            "destroy" -> {
+                val result = root.execute(
+                    "settings delete global overlay_display_devices",
+                    timeoutMillis = 5_000,
+                )
+                if (!result.ok) return rootError(result)
+                ok("virtual_display").put("action", "destroy").toString()
+            }
+            else -> error("INVALID_ARGUMENT", "action 仅支持 create/destroy/status")
+        }
+    }
+
+    private fun optionalInt(args: JSONObject, name: String): Int? =
+        if (args.has(name) && !args.isNull(name)) args.optInt(name) else null
 
     private fun topMemoryApps(args: JSONObject): String {
         val limit = args.optInt("limit", 10).coerceIn(1, 30)

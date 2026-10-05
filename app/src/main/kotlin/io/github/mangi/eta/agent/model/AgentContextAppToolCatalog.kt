@@ -92,6 +92,17 @@ internal object AgentContextAppToolCatalog {
             )
             .put(
                 AgentToolSchema.function(
+                    name = "list_displays",
+                    description = "列出当前可用的屏幕：主屏、厂商副屏和已创建的虚拟屏，返回 display_id、尺寸与名称。" +
+                        "需要观察或操作非主屏时先用它取 display_id，再把它传给 observe_screen 与手势工具；" +
+                        "虚拟屏可用 virtual_display 创建。",
+                    parameters = JSONObject()
+                        .put("type", "object")
+                        .put("properties", JSONObject())
+                )
+            )
+            .put(
+                AgentToolSchema.function(
                     name = "observe_screen",
                     description = "观察当前手机屏幕，默认只返回前台应用、屏幕尺寸、observation_id 与可见 UI 节点，不附截图。节点为空、目标无法唯一识别、界面以 Canvas/地图/图片/二维码等视觉内容为主，或任务依赖颜色、图像、空间布局时，显式设置 include_screenshot=true；补截图时保持 include_ui_tree=true，以同一次新观察刷新节点和 observation_id，禁止把新截图与旧节点混用。节点动作必须原样携带同一次观察的 observation_id；树被截断但节点语义仍有效时，优先把 max_nodes 提高到 120 后重试，不要仅因截断请求截图。",
                     parameters = JSONObject()

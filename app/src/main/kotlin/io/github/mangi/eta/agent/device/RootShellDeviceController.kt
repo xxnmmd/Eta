@@ -348,7 +348,10 @@ internal class RootShellDeviceController(
         return inputCommand("input swipe $x1 $y1 $x2 $y2 $duration", "swipe")
     }
 
-    fun scroll(direction: String): String {
+    fun scroll(
+        direction: String,
+        displayId: Int = DisplayTargetPolicy.DEFAULT_DISPLAY_ID,
+    ): String {
         val parsed = ScrollDirection.parse(direction)
             ?: return scrollErrorJson(
                 "scroll",
@@ -356,6 +359,26 @@ internal class RootShellDeviceController(
                 "INVALID_ARGUMENT",
                 "direction 仅支持 up/down/left/right",
             )
+        val targetDisplay = DisplayTargetPolicy.normalize(displayId)
+        if (DisplayTargetPolicy.usesRootInput(targetDisplay)) {
+            if (!rootAvailable()) return rootRequired()
+            val bounds = displayContentBounds(targetDisplay)
+            val gesture = parsed.gestureWithin(bounds)
+                ?: return scrollErrorJson(
+                    "scroll",
+                    parsed,
+                    "INVALID_ARGUMENT",
+                    "目标屏幕尺寸过小，无法执行滚动",
+                )
+            return inputCommand(
+                "input -d $targetDisplay swipe ${gesture.start.x} ${gesture.start.y} " +
+                    "${gesture.end.x} ${gesture.end.y} 300",
+                "scroll",
+            ).let { result ->
+                runCatching { JSONObject(result).put("display_id", targetDisplay).toString() }
+                    .getOrDefault(result)
+            }
+        }
         AgentAccessibilityService.current()?.let { service ->
             return scrollActionJson("scroll", service.scrollCurrent(parsed))
         }
@@ -438,7 +461,7 @@ internal class RootShellDeviceController(
         val resolved = resolveUiAutomatorNode(observation, index)
             ?: return errorJson("STALE_NODE", "无法在当前界面唯一确认目标节点，请重新观察屏幕")
         val node = resolved.node
-        return tap(node.centerX, node.centerY).rewriteTool("tap_element")
+        return tap(node.centerX, node.centerY, observation.displayId).rewriteTool("tap_element")
     }
 
     fun longPressElement(
@@ -461,7 +484,8 @@ internal class RootShellDeviceController(
         val resolved = resolveUiAutomatorNode(observation, index)
             ?: return errorJson("STALE_NODE", "无法在当前界面唯一确认目标节点，请重新观察屏幕")
         val node = resolved.node
-        return longPress(node.centerX, node.centerY, durationMs).rewriteTool("long_press_element")
+        return longPress(node.centerX, node.centerY, durationMs, observation.displayId)
+            .rewriteTool("long_press_element")
     }
 
     fun scrollElement(
@@ -999,6 +1023,16 @@ internal class RootShellDeviceController(
         val result = runSuText("wm size", timeoutSeconds = 5)
         return AndroidDisplaySizeParser.parse(result.output)
             ?: error("无法读取屏幕尺寸：${result.output.take(160)}")
+    }
+
+    private fun displayContentBounds(displayId: Int): Rect {
+        val (width, height) = displayDimensions(displayId)
+        return Rect(
+            0,
+            (height * 0.1f).toInt(),
+            width,
+            (height * 0.9f).toInt(),
+        )
     }
 
     private fun screenContentBounds(): Rect {

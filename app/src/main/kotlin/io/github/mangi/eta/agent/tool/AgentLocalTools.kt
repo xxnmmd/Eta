@@ -183,7 +183,12 @@ internal class AgentLocalTools(
                 "long_press" -> textResult(longPress(args))
                 "long_press_element" -> textResult(longPressElement(args))
                 "swipe" -> textResult(swipe(args))
-                "scroll" -> textResult(deviceController.scroll(args.optString("direction")))
+                "scroll" -> textResult(
+                    deviceController.scroll(
+                        direction = args.optString("direction"),
+                        displayId = DisplayTargetPolicy.normalize(args.optNullableInt("display_id")),
+                    ),
+                )
                 "scroll_element" -> textResult(scrollElement(args))
                 "input_text" -> textResult(inputText(args))
                 "replace_text" -> textResult(replaceText(args))
@@ -195,6 +200,8 @@ internal class AgentLocalTools(
                 "wait" -> textResult(deviceController.waitMs(args.optInt("duration_ms", 1_000)))
                 "wait_for_text" -> textResult(waitForText(args))
                 "wait_for_package" -> textResult(waitForPackage(args))
+                "list_displays" -> textResult(listDisplays())
+                "virtual_display" -> textResult(virtualDisplay(args))
                 "open_system_panel" -> textResult(deviceController.openSystemPanel(args.optString("panel")))
                 in DEVICE_TOOL_NAMES ->
                     structuredDeviceTools.execute(toolCall.name, args)
@@ -577,6 +584,32 @@ internal class AgentLocalTools(
             packageName = args.optString("package_name"),
             timeoutMs = args.optInt("timeout_ms", 10_000)
         )
+
+    /** 当前可用的屏幕列表：主屏、厂商副屏，以及通过 virtual_display 创建的模拟副屏。 */
+    private fun listDisplays(): String =
+        JSONObject()
+            .put("ok", true)
+            .put("tool", "list_displays")
+            .put(
+                "displays",
+                JSONArray().also { array ->
+                    deviceController.displayInfos().forEach { info ->
+                        array.put(
+                            JSONObject()
+                                .put("id", info.id)
+                                .put("width", info.width)
+                                .put("height", info.height)
+                                .put("name", info.name)
+                                .put("is_default", info.isDefault),
+                        )
+                    }
+                },
+            )
+            .toString()
+
+    private fun virtualDisplay(args: JSONObject): String =
+        structuredDeviceTools.execute("virtual_display", args)?.content
+            ?: errorResult("UNKNOWN_TOOL", "虚拟屏工具不可用")
 
     private fun convertPoint(
         x: Int,
@@ -1357,6 +1390,7 @@ internal class AgentLocalTools(
         val DEVICE_DIRECT_TOOL_NAMES = setOf(
             "set_alarm",
             "set_timer",
+            "virtual_display",
             "device_status",
             "network_info",
             "top_memory_apps",
