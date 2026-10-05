@@ -235,7 +235,7 @@ internal class RootShellDeviceController(
             )
             .put("focus", focus)
             .put("display_id", targetDisplay)
-            .put("displays", displays.toJsonArray())
+            .put("displays", displays.toDisplayJsonArray())
             .put("observation_id", elementObservation?.id ?: JSONObject.NULL)
             .put("observation_source", elementObservation?.source?.wireName ?: JSONObject.NULL)
             .put("window_id", elementObservation?.windowId ?: JSONObject.NULL)
@@ -1232,10 +1232,10 @@ internal class RootShellDeviceController(
             .put("code", "DISPLAY_UNAVAILABLE")
             .put("message", "屏幕 $displayId 不存在或不可访问；可用屏幕见 displays")
             .put("display_id", displayId)
-            .put("displays", displays.toJsonArray())
+            .put("displays", displays.toDisplayJsonArray())
             .toString()
 
-    private fun List<DisplayInfo>.toJsonArray(): JSONArray =
+    private fun List<DisplayInfo>.toDisplayJsonArray(): JSONArray =
         JSONArray().also { array ->
             forEach { info ->
                 array.put(
