@@ -34,6 +34,7 @@ import androidx.compose.material.icons.rounded.Language
 import androidx.compose.material.icons.rounded.Layers
 import androidx.compose.material.icons.rounded.LocationOn
 import androidx.compose.material.icons.rounded.Mic
+import androidx.compose.material.icons.rounded.Monitor
 import androidx.compose.material.icons.rounded.MonitorHeart
 import androidx.compose.material.icons.rounded.MusicNote
 import androidx.compose.material.icons.rounded.MyLocation
@@ -58,6 +59,8 @@ import androidx.compose.ui.graphics.vector.ImageVector
 
 internal fun iconForTool(toolId: String): ImageVector = when (toolId) {
     "observe", "observe_screen" -> Icons.Rounded.DocumentScanner
+    "list_displays" -> Icons.Rounded.Monitor
+    "virtual_display" -> Icons.Rounded.ScreenshotMonitor
     "click", "tap", "tap_element" -> Icons.Rounded.AdsClick
     "tap_area" -> Icons.Rounded.MyLocation
     "long_press", "long_press_element" -> Icons.Rounded.TouchApp
