@@ -226,7 +226,6 @@ internal object AgentModelClient {
         require(baseUrl.isNotBlank()) { "请先配置 API 地址" }
         require(apiKey.isNotBlank()) { "请先配置 API Key" }
         require(model.isNotBlank()) { "请先配置模型名" }
-        requireContextWindow()
         require(
             reasoningCapabilities?.mandatory != true ||
                 effectiveReasoningEffort != ReasoningEffort.OFF

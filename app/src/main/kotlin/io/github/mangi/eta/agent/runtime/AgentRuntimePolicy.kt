@@ -51,7 +51,8 @@ internal object AgentRuntimePolicy {
                 config.deviceSensitiveActionTools && permissions.deviceSensitiveActionTools,
             thinkingEnabled = thinkingEnabled,
             reasoningEffort = effectiveEffort,
-            autoCompactionEnabled = config.autoCompactionEnabled && permissions.autoCompaction,
+            autoCompactionEnabled = config.autoCompactionEnabled && permissions.autoCompaction &&
+                config.contextWindow?.takeIf { it > 0 } != null,
         )
         if (thinkingEnabled) return constrained
         return constrained.copy(

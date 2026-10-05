@@ -10,6 +10,25 @@ import org.junit.Test
 
 class AgentContextCompactionTest {
     @Test
+    fun missingContextWindowAllowsConversationWithoutAutomaticCompaction() {
+        var requests = 0
+        val result = AgentModelClient.complete(
+            config.copy(contextWindow = null, autoCompactionEnabled = true),
+            "无需窗口也能对话",
+            AgentModelClient.ToolExecutor { error("不应执行工具") },
+            provider = provider { request, emit ->
+                requests++
+                emit(ProviderEvent.Usage(AgentTokenUsage(inputTokens = 120_000)))
+                assertEquals(ProviderRequestPurpose.CHAT, request.purpose)
+                response("正常回复")
+            },
+        )
+        assertEquals(1, requests)
+        assertEquals("正常回复", result.content)
+        assertNull(result.contextSnapshot)
+    }
+
+    @Test
     fun automaticScreenContentIsNotCopiedIntoCompactionInput() {
         val messages = jsonHistory()
         val user = AgentConversationCodec.userTextMessage("保留最新问题")

@@ -16,6 +16,23 @@ import org.junit.Test
 
 class AgentRuntimePolicyTest {
     @Test
+    fun automaticCompactionIsDisabledWhenContextWindowIsUnknown() {
+        val constrained = AgentRuntimePolicy.constrain(
+            config = modelConfig(false, false, false).copy(
+                contextWindow = null,
+                autoCompactionEnabled = true,
+            ),
+            permissions = AgentRuntimePolicy.Permissions(
+                terminalTools = false,
+                browserTools = false,
+                thinking = false,
+                autoCompaction = true,
+            ),
+        )
+        assertFalse(constrained.autoCompactionEnabled)
+    }
+
+    @Test
     fun unavailablePreferencesFailClosed() {
         assertEquals(
             AgentRuntimePolicy.Permissions(
